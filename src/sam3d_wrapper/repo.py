@@ -79,6 +79,15 @@ def install_sam3(vendor_dir: Path | None = None) -> None:
     print("SAM3 installed.")
 
 
+def ensure_detectron2() -> None:
+    """Ensure detectron2 is installed. Installs automatically if missing."""
+    try:
+        import detectron2  # noqa: F401
+    except ImportError:
+        print("detectron2 not found, installing automatically ...")
+        install_detectron2()
+
+
 def ensure_repo() -> Path:
     """
     Ensure the sam-3d-body repo is cloned and on sys.path.

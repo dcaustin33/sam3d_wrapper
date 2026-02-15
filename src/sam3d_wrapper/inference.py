@@ -15,7 +15,7 @@ import cv2
 import numpy as np
 
 from sam3d_wrapper.download import HF_REPOS, get_checkpoint_path, verify_checkpoint
-from sam3d_wrapper.repo import activate_imports, ensure_repo
+from sam3d_wrapper.repo import activate_imports, ensure_detectron2, ensure_repo
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp", ".gif"}
 
@@ -127,6 +127,8 @@ class Sam3DBody:
 
         # Ensure the upstream repo is available
         ensure_repo()
+        if use_detector:
+            ensure_detectron2()
         activate_imports()
 
         self.model_variant = model_variant
