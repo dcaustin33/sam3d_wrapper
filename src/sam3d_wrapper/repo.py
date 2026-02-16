@@ -53,14 +53,21 @@ def clone_repo(vendor_dir: Path | None = None) -> Path:
     return repo_dir
 
 
+def _pip_install(*args: str) -> None:
+    """Install packages using uv pip (preferred) or pip as fallback."""
+    import shutil
+
+    uv = shutil.which("uv")
+    if uv:
+        _run([uv, "pip", "install", *args])
+    else:
+        _run([sys.executable, "-m", "pip", "install", *args])
+
+
 def install_detectron2() -> None:
     """Install detectron2 from the specific commit used by sam-3d-body."""
     print("Installing detectron2 ...")
-    _run([
-        sys.executable, "-m", "pip", "install",
-        DETECTRON2_URL,
-        "--no-build-isolation", "--no-deps",
-    ])
+    _pip_install(DETECTRON2_URL, "--no-build-isolation", "--no-deps")
     print("detectron2 installed.")
 
 
@@ -74,8 +81,8 @@ def install_sam3(vendor_dir: Path | None = None) -> None:
         _run(["git", "clone", "--depth", "1", SAM3_URL, str(sam3_dir)])
 
     print("Installing SAM3 ...")
-    _run([sys.executable, "-m", "pip", "install", "-e", str(sam3_dir)])
-    _run([sys.executable, "-m", "pip", "install", "decord", "psutil"])
+    _pip_install("-e", str(sam3_dir))
+    _pip_install("decord", "psutil")
     print("SAM3 installed.")
 
 

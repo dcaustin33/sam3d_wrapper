@@ -165,12 +165,104 @@ class Sam3DBody:
         """Mesh face indices from the loaded model."""
         return self._estimator.faces
 
+    @staticmethod
+    def average_shape(results: list[ImageResult]) -> np.ndarray:
+        """Compute the mean shape vector across all detected persons.
+
+        Useful for getting a consistent body shape from a sequence of frames
+        of the same person, then passing it as ``shape_override`` to
+        ``predict`` or ``predict_batch``.
+
+        Args:
+            results: List of ImageResult from prior inference.
+
+        Returns:
+            Mean shape vector as a (45,) numpy array.
+        """
+        shapes = [
+            p.shape_params
+            for r in results
+            for p in r.persons
+            if p.shape_params is not None
+        ]
+        if not shapes:
+            raise ValueError("No shape parameters found in results")
+        return np.mean(shapes, axis=0)
+
+    def recompute_with_shape(
+        self, result: ImageResult, shape_override: np.ndarray
+    ) -> ImageResult:
+        """Recompute mesh vertices for all persons using a fixed shape vector.
+
+        Replaces ``pred_vertices``, ``pred_keypoints_3d``, and
+        ``shape_params`` in each person's result, keeping the original
+        pose, scale, and camera parameters.
+
+        Args:
+            result: An ImageResult from a prior ``predict`` call.
+            shape_override: A (45,) numpy array of shape PCA coefficients.
+
+        Returns:
+            The same ImageResult, mutated in-place with updated vertices.
+        """
+        import torch
+
+        head = self._estimator.model.head_pose
+        device = next(head.parameters()).device
+        shape_t = torch.tensor(
+            shape_override, dtype=torch.float32
+        ).unsqueeze(0).to(device)
+
+        for person in result.persons:
+            raw = person.raw
+            with torch.no_grad():
+                global_rot = torch.tensor(
+                    raw["global_rot"], dtype=torch.float32
+                ).unsqueeze(0).to(device)
+                verts, j3d, jcoords, model_params, joint_rots = head.mhr_forward(
+                    global_trans=global_rot * 0,
+                    global_rot=global_rot,
+                    body_pose_params=torch.tensor(
+                        raw["body_pose_params"], dtype=torch.float32
+                    ).unsqueeze(0).to(device),
+                    hand_pose_params=torch.tensor(
+                        raw["hand_pose_params"], dtype=torch.float32
+                    ).unsqueeze(0).to(device),
+                    scale_params=torch.tensor(
+                        raw["scale_params"], dtype=torch.float32
+                    ).unsqueeze(0).to(device),
+                    shape_params=shape_t,
+                    expr_params=torch.tensor(
+                        raw["expr_params"], dtype=torch.float32
+                    ).unsqueeze(0).to(device),
+                    return_keypoints=True,
+                    return_joint_coords=True,
+                    return_model_params=True,
+                    return_joint_rotations=True,
+                )
+                j3d = j3d[:, :70]
+                verts[..., [1, 2]] *= -1
+                j3d[..., [1, 2]] *= -1
+
+            new_verts = verts.squeeze(0).cpu().numpy()
+            new_j3d = j3d.squeeze(0).cpu().numpy()
+
+            person.pred_vertices = new_verts
+            person.pred_keypoints_3d = new_j3d
+            person.shape_params = shape_override.copy()
+            raw["pred_vertices"] = new_verts
+            raw["pred_keypoints_3d"] = new_j3d
+            raw["shape_params"] = shape_override.copy()
+
+        return result
+
     def predict(
         self,
         image: str | Path | np.ndarray,
         bbox_threshold: float | None = None,
         use_mask: bool = False,
         bboxes: np.ndarray | None = None,
+        shape_override: np.ndarray | None = None,
     ) -> ImageResult:
         """
         Run inference on a single image.
@@ -180,6 +272,8 @@ class Sam3DBody:
             bbox_threshold: Override the default detection threshold.
             use_mask: Enable mask-conditioned prediction.
             bboxes: Provide manual bounding boxes as Nx4 array [x1,y1,x2,y2].
+            shape_override: Fixed (45,) shape vector applied after inference.
+                Useful for enforcing consistent body shape across a sequence.
 
         Returns:
             ImageResult with detected persons and their mesh data.
@@ -204,11 +298,16 @@ class Sam3DBody:
         raw_outputs = self._estimator.process_one_image(image_path, **kwargs)
         persons = _parse_outputs(raw_outputs)
 
-        return ImageResult(
+        result = ImageResult(
             image_path=image_path,
             persons=persons,
             image_bgr=img_bgr,
         )
+
+        if shape_override is not None:
+            self.recompute_with_shape(result, shape_override)
+
+        return result
 
     def predict_batch(
         self,
@@ -218,6 +317,7 @@ class Sam3DBody:
         use_mask: bool = False,
         save_meshes: bool = False,
         save_visualizations: bool = True,
+        shape_override: np.ndarray | None = None,
     ) -> list[ImageResult]:
         """
         Run inference on a directory of images.
@@ -229,6 +329,8 @@ class Sam3DBody:
             use_mask: Enable mask-conditioned prediction.
             save_meshes: Save .ply mesh files per person.
             save_visualizations: Save rendered overlay images.
+            shape_override: Fixed (45,) shape vector applied to every frame.
+                Use ``average_shape()`` on a prior run's results to obtain one.
 
         Returns:
             List of ImageResult, one per input image.
@@ -241,6 +343,8 @@ class Sam3DBody:
             return []
 
         print(f"Processing {len(image_files)} images ...")
+        if shape_override is not None:
+            print("Using fixed shape override for all frames.")
 
         if output_dir is not None:
             output_dir = Path(output_dir)
@@ -252,6 +356,7 @@ class Sam3DBody:
                 img_path,
                 bbox_threshold=bbox_threshold,
                 use_mask=use_mask,
+                shape_override=shape_override,
             )
             results.append(result)
 
@@ -363,7 +468,18 @@ def cli_infer() -> None:
         action="store_true",
         help="Disable FOV estimation (use default FOV)",
     )
+    parser.add_argument(
+        "--shape-override",
+        type=str,
+        default=None,
+        help="Path to a .npy file containing a (45,) shape vector to use for all frames",
+    )
     args = parser.parse_args()
+
+    shape_override = None
+    if args.shape_override:
+        shape_override = np.load(args.shape_override)
+        print(f"Loaded shape override from {args.shape_override}")
 
     model = Sam3DBody(
         model_variant=args.variant,
@@ -380,4 +496,5 @@ def cli_infer() -> None:
         use_mask=args.use_mask,
         save_meshes=args.save_meshes,
         save_visualizations=not args.no_vis,
+        shape_override=shape_override,
     )

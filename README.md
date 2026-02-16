@@ -17,6 +17,7 @@ A pip-installable wrapper around [Meta's SAM 3D Body](https://github.com/faceboo
 - [uv](https://docs.astral.sh/uv/) package manager
 - A GPU with CUDA support (CPU works but is slow)
 - Hugging Face account with access approved for the model checkpoints
+- System packages for headless rendering: `libegl1-mesa`, `libosmesa6` (installed automatically by `setup.sh`)
 
 ### Request checkpoint access
 
@@ -51,6 +52,30 @@ uv run sam3d-setup
 # 3. Download checkpoints (requires HF login)
 uv run sam3d-download --variant dinov3
 ```
+
+## Setup gotchas
+
+### detectron2 is installed outside uv's lock file
+
+detectron2 must be installed with `--no-build-isolation --no-deps` from a pinned git commit. Because it is not in `pyproject.toml`, **running `uv sync` will remove it**. If that happens, reinstall with:
+
+```bash
+uv pip install "git+https://github.com/facebookresearch/detectron2.git@a1ce2f9" --no-build-isolation --no-deps
+```
+
+### Headless rendering requires PYOPENGL_PLATFORM=egl
+
+On headless servers (no display), pyrender needs the EGL backend. Set this environment variable before running inference with visualization:
+
+```bash
+export PYOPENGL_PLATFORM=egl
+```
+
+The EGL backend also requires the current user to be in the `video` and `render` groups for `/dev/dri` access. The setup script handles this, but you may need to log out and back in for group changes to take effect.
+
+### setuptools must be pinned below v81
+
+detectron2 uses `pkg_resources` which was removed in setuptools 81+. The package pins `setuptools<81` to ensure compatibility.
 
 ## Usage
 

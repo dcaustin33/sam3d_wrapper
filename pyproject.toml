@@ -51,16 +51,17 @@ dependencies = [
     "pycocotools>=2.0",
     "xtcocotools>=1.14",
     "cython>=3.0",
+    "setuptools<81",
+    "cloudpickle>=2.0",
+
+    # FOV estimation
+    "moge @ git+https://github.com/microsoft/MoGe.git",
 
     # Misc
     "tqdm>=4.65",
 ]
 
 [project.optional-dependencies]
-# Optional: MoGe for field-of-view estimation
-fov = [
-    "moge @ git+https://github.com/microsoft/MoGe.git",
-]
 # Optional: for training / development
 dev = [
     "wandb>=0.16",
