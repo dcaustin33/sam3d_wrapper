@@ -115,6 +115,16 @@ def main() -> None:
     np.save(out_dir / "shape.npy", avg_shape)
     print(f"Mean shape saved to {out_dir / 'shape.npy'}")
 
+    # Save the estimated focal length from the first detected person
+    focal_lengths = [
+        p.focal_length
+        for r in sample_results
+        for p in r.persons
+    ]
+    avg_focal = float(np.median(focal_lengths))
+    np.save(out_dir / "focal_length.npy", np.array(avg_focal))
+    print(f"Focal length saved to {out_dir / 'focal_length.npy'} (median: {avg_focal:.1f})")
+
     # --- Phase 2: run inference on all images with fixed shape ---
     print(f"\nPhase 2: Running inference on {len(image_files)} images with fixed shape ...")
     faces = model.faces
