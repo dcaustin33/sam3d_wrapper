@@ -363,6 +363,9 @@ class Sam3DBody:
             if output_dir is not None and result.num_persons > 0:
                 image_name = img_path.stem
 
+                # Always save raw numpy results
+                self._save_numpy_results(result, output_dir, image_name)
+
                 if save_visualizations:
                     self._save_visualization(result, output_dir, image_name)
 
@@ -372,6 +375,28 @@ class Sam3DBody:
         total_persons = sum(r.num_persons for r in results)
         print(f"Done: {len(results)} images, {total_persons} persons detected.")
         return results
+
+    def _save_numpy_results(
+        self, result: ImageResult, output_dir: Path, image_name: str
+    ) -> None:
+        """Save raw numpy arrays per person as .npz files."""
+        for p in result.persons:
+            data = {
+                "pred_vertices": p.pred_vertices,
+                "pred_keypoints_3d": p.pred_keypoints_3d,
+                "pred_keypoints_2d": p.pred_keypoints_2d,
+                "pred_cam_t": p.pred_cam_t,
+                "focal_length": np.array(p.focal_length),
+                "bbox": p.bbox,
+            }
+            if p.body_pose_params is not None:
+                data["body_pose_params"] = p.body_pose_params
+            if p.hand_pose_params is not None:
+                data["hand_pose_params"] = p.hand_pose_params
+            if p.shape_params is not None:
+                data["shape_params"] = p.shape_params
+            out_path = output_dir / f"{image_name}_person{p.person_id}.npz"
+            np.savez(str(out_path), **data)
 
     def _save_visualization(
         self, result: ImageResult, output_dir: Path, image_name: str
