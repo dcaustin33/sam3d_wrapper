@@ -7,6 +7,7 @@ wrapping the upstream notebook_utils and model loading.
 
 import argparse
 import os
+import random
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -246,6 +247,9 @@ class Sam3DBody:
 
             new_verts = verts.squeeze(0).cpu().numpy()
             new_j3d = j3d.squeeze(0).cpu().numpy()
+            new_jcoords = jcoords.squeeze(0).cpu().numpy()
+            new_model_params = model_params.squeeze(0).cpu().numpy()
+            new_joint_rots = joint_rots.squeeze(0).cpu().numpy()
 
             person.pred_vertices = new_verts
             person.pred_keypoints_3d = new_j3d
@@ -253,8 +257,24 @@ class Sam3DBody:
             raw["pred_vertices"] = new_verts
             raw["pred_keypoints_3d"] = new_j3d
             raw["shape_params"] = shape_override.copy()
+            raw["pred_joint_coords"] = new_jcoords
+            raw["mhr_model_params"] = new_model_params
+            raw["pred_global_rots"] = new_joint_rots
 
         return result
+
+    @staticmethod
+    def _build_cam_intrinsics(
+        focal_length: float, image_hw: tuple[int, int]
+    ) -> np.ndarray:
+        """Build a (1, 3, 3) camera intrinsics matrix from a focal length."""
+        h, w = image_hw
+        return np.array(
+            [[[focal_length, 0, w / 2.0],
+              [0, focal_length, h / 2.0],
+              [0, 0, 1]]],
+            dtype=np.float32,
+        )
 
     def predict(
         self,
@@ -263,6 +283,7 @@ class Sam3DBody:
         use_mask: bool = False,
         bboxes: np.ndarray | None = None,
         shape_override: np.ndarray | None = None,
+        focal_length: float | None = None,
     ) -> ImageResult:
         """
         Run inference on a single image.
@@ -274,10 +295,15 @@ class Sam3DBody:
             bboxes: Provide manual bounding boxes as Nx4 array [x1,y1,x2,y2].
             shape_override: Fixed (45,) shape vector applied after inference.
                 Useful for enforcing consistent body shape across a sequence.
+            focal_length: Fixed focal length in pixels. When provided, skips
+                FOV estimation and uses this value for both fx and fy with the
+                principal point at the image center.
 
         Returns:
             ImageResult with detected persons and their mesh data.
         """
+        import torch
+
         thr = bbox_threshold if bbox_threshold is not None else self.bbox_threshold
 
         if isinstance(image, (str, Path)):
@@ -294,6 +320,10 @@ class Sam3DBody:
             kwargs["use_mask"] = True
         if bboxes is not None:
             kwargs["bboxes"] = bboxes
+        if focal_length is not None:
+            h, w = img_bgr.shape[:2]
+            cam_int = self._build_cam_intrinsics(focal_length, (h, w))
+            kwargs["cam_int"] = torch.tensor(cam_int)
 
         raw_outputs = self._estimator.process_one_image(image_path, **kwargs)
         persons = _parse_outputs(raw_outputs)
@@ -318,6 +348,8 @@ class Sam3DBody:
         save_meshes: bool = False,
         save_visualizations: bool = True,
         shape_override: np.ndarray | None = None,
+        shape_calibration_frames: int | None = None,
+        focal_length: float | None = None,
     ) -> list[ImageResult]:
         """
         Run inference on a directory of images.
@@ -331,6 +363,13 @@ class Sam3DBody:
             save_visualizations: Save rendered overlay images.
             shape_override: Fixed (45,) shape vector applied to every frame.
                 Use ``average_shape()`` on a prior run's results to obtain one.
+            shape_calibration_frames: If set, randomly sample this many frames,
+                run inference on them to compute an average shape, then re-run
+                all frames with that shape locked in. The computed shape is saved
+                to ``output_dir/shape.npy``. Ignored when ``shape_override``
+                is already provided.
+            focal_length: Fixed focal length in pixels. When provided, skips
+                FOV estimation and uses this value for every frame.
 
         Returns:
             List of ImageResult, one per input image.
@@ -342,13 +381,38 @@ class Sam3DBody:
             print(f"No images found at {images_path}")
             return []
 
-        print(f"Processing {len(image_files)} images ...")
-        if shape_override is not None:
-            print("Using fixed shape override for all frames.")
-
         if output_dir is not None:
             output_dir = Path(output_dir)
             output_dir.mkdir(parents=True, exist_ok=True)
+
+        # --- Shape calibration phase ---
+        if shape_calibration_frames is not None and shape_override is None:
+            n = min(shape_calibration_frames, len(image_files))
+            calibration_files = random.sample(image_files, n)
+            print(
+                f"Shape calibration: running {n} randomly sampled frames "
+                f"out of {len(image_files)} ..."
+            )
+            cal_results = []
+            for img_path in tqdm(calibration_files, desc="Calibration"):
+                cal_results.append(
+                    self.predict(
+                        img_path,
+                        bbox_threshold=bbox_threshold,
+                        use_mask=use_mask,
+                        focal_length=focal_length,
+                    )
+                )
+            shape_override = self.average_shape(cal_results)
+            print(f"Calibrated shape from {n} frames.")
+
+        print(f"Processing {len(image_files)} images ...")
+        if shape_override is not None:
+            print("Using fixed shape override for all frames.")
+            if output_dir is not None:
+                shape_path = output_dir / "shape.npy"
+                np.save(str(shape_path), shape_override)
+                print(f"Saved shape to {shape_path}")
 
         results = []
         for img_path in tqdm(image_files, desc="Inference"):
@@ -357,6 +421,7 @@ class Sam3DBody:
                 bbox_threshold=bbox_threshold,
                 use_mask=use_mask,
                 shape_override=shape_override,
+                focal_length=focal_length,
             )
             results.append(result)
 
@@ -379,38 +444,29 @@ class Sam3DBody:
     def _save_numpy_results(
         self, result: ImageResult, output_dir: Path, image_name: str
     ) -> None:
-        """Save raw numpy arrays per person as .npz files."""
+        """Save all raw arrays per person as .npz files in raw/ subdir."""
+        raw_dir = output_dir / "raw"
+        raw_dir.mkdir(exist_ok=True)
         for p in result.persons:
-            data = {
-                "pred_vertices": p.pred_vertices,
-                "pred_keypoints_3d": p.pred_keypoints_3d,
-                "pred_keypoints_2d": p.pred_keypoints_2d,
-                "pred_cam_t": p.pred_cam_t,
-                "focal_length": np.array(p.focal_length),
-                "bbox": p.bbox,
-            }
-            if p.body_pose_params is not None:
-                data["body_pose_params"] = p.body_pose_params
-            if p.hand_pose_params is not None:
-                data["hand_pose_params"] = p.hand_pose_params
-            if p.shape_params is not None:
-                data["shape_params"] = p.shape_params
-            out_path = output_dir / f"{image_name}_person{p.person_id}.npz"
-            np.savez(str(out_path), **data)
+            suffix = "" if result.num_persons == 1 else f"_person{p.person_id}"
+            out_path = raw_dir / f"{image_name}{suffix}.npz"
+            np.savez(str(out_path), **p.raw)
 
     def _save_visualization(
         self, result: ImageResult, output_dir: Path, image_name: str
     ) -> None:
-        """Save a visualization image with mesh overlays."""
+        """Save a visualization image with mesh overlays in vis/ subdir."""
         activate_imports()
         from tools.vis_utils import visualize_sample_together
 
         if result.image_bgr is None or result.num_persons == 0:
             return
 
+        vis_dir = output_dir / "vis"
+        vis_dir.mkdir(exist_ok=True)
         raw_outputs = [p.raw for p in result.persons]
         vis = visualize_sample_together(result.image_bgr, raw_outputs, self.faces)
-        out_path = output_dir / f"{image_name}_vis.jpg"
+        out_path = vis_dir / f"{image_name}.jpg"
         cv2.imwrite(str(out_path), vis.astype(np.uint8))
 
     def _save_meshes(
@@ -494,10 +550,23 @@ def cli_infer() -> None:
         help="Disable FOV estimation (use default FOV)",
     )
     parser.add_argument(
+        "--focal-length",
+        type=float,
+        default=None,
+        help="Fixed focal length in pixels (skips FOV estimation)",
+    )
+    parser.add_argument(
         "--shape-override",
         type=str,
         default=None,
         help="Path to a .npy file containing a (45,) shape vector to use for all frames",
+    )
+    parser.add_argument(
+        "--shape-calibration-frames",
+        type=int,
+        default=None,
+        help="Randomly sample N frames to estimate an average shape, then use it for all frames. "
+             "Ignored when --shape-override is provided.",
     )
     args = parser.parse_args()
 
@@ -522,4 +591,6 @@ def cli_infer() -> None:
         save_meshes=args.save_meshes,
         save_visualizations=not args.no_vis,
         shape_override=shape_override,
+        shape_calibration_frames=args.shape_calibration_frames,
+        focal_length=args.focal_length,
     )

@@ -20,7 +20,14 @@ cd "$PROJECT_DIR"
 
 export PYOPENGL_PLATFORM=egl
 
-exec uv run sam3d-infer \
-    --images /home/ubuntu/a100-gaussian-avatar/sam3d_wrapper/datasets/inference_images \
-    --output ./output/inference_results \
-    --no-vis
+BASE="/home/ubuntu/a100-gaussian-avatar/gaussian_avatar/datasets/people_snapshot_corrected"
+
+for SUBJECT in female-3-casual female-4-casual male-4-casual; do
+    echo "=== Running inference for $SUBJECT ==="
+    uv run sam3d-infer \
+        --images "$BASE/$SUBJECT/cam000/images" \
+        --output "$BASE/$SUBJECT/cam000/results" \
+        --no-vis \
+        --shape-calibration-frames 20 \
+        --focal-length 2664
+done
