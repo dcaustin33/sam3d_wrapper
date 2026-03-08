@@ -30,7 +30,7 @@ def parse_focal_lengths(intri_path: Path) -> dict[str, float]:
 def main() -> None:
     focal_lengths = parse_focal_lengths(DATASET / "intri.yml")
 
-    camera_names = [f"Camera_B{i}" for i in range(1, 24)]
+    camera_names = [f"Camera_B{i}" for i in range(3, 24)]
     mask_dirs = [DATASET / f"{name}_masks" for name in camera_names]
     print(f"Will process {len(mask_dirs)} cameras (Camera_B1_masks .. Camera_B23_masks)")
 

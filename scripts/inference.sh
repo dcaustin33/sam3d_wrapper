@@ -20,4 +20,6 @@ cd "$PROJECT_DIR"
 
 export PYOPENGL_PLATFORM=egl
 
-exec uv run python scripts/infer_coreview377.py
+uv run python scripts/infer_coreview377.py
+
+sudo shutdown -h now
