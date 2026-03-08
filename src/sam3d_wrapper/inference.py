@@ -6,10 +6,14 @@ wrapping the upstream notebook_utils and model loading.
 """
 
 import argparse
+import functools
+import logging
 import os
 import random
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
+from queue import Queue
 from typing import Any
 
 import cv2
@@ -19,6 +23,72 @@ from sam3d_wrapper.download import HF_REPOS, get_checkpoint_path, verify_checkpo
 from sam3d_wrapper.repo import activate_imports, ensure_detectron2, ensure_repo
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp", ".gif"}
+
+logger = logging.getLogger(__name__)
+
+
+def _bg_save(fn):
+    """Decorator: dispatch save method to background thread when enabled.
+
+    When ``self._bg_saver`` is active, snapshots numpy array arguments
+    (via copy) on the calling thread and queues the work. Returns None.
+    When no saver is active, calls *fn* directly.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        if self._bg_saver is None:
+            return fn(self, *args, **kwargs)
+        # Snapshot numpy arrays so the caller can safely reuse buffers
+        safe_args = tuple(
+            a.copy() if isinstance(a, np.ndarray) else a for a in args
+        )
+        safe_kwargs = {
+            k: v.copy() if isinstance(v, np.ndarray) else v
+            for k, v in kwargs.items()
+        }
+        self._bg_saver.submit(lambda: fn(self, *safe_args, **safe_kwargs))
+        return None
+
+    return wrapper
+
+
+class _BackgroundSaver:
+    """Daemon thread + bounded queue for offloading I/O from the main loop.
+
+    Modelled after gaussian_avatar's ImageSaver pattern.
+    """
+
+    def __init__(self, maxsize: int = 100) -> None:
+        self._queue: Queue = Queue(maxsize=maxsize)
+        self._thread = threading.Thread(target=self._worker, daemon=True)
+        self._thread.start()
+
+    def _worker(self) -> None:
+        while True:
+            fn = self._queue.get()
+            if fn is None:
+                self._queue.task_done()
+                break
+            try:
+                fn()
+            except Exception:
+                logger.exception("Background save failed")
+            self._queue.task_done()
+
+    def submit(self, fn) -> None:
+        self._queue.put(fn)
+
+    def flush(self) -> None:
+        """Block until all queued work is done."""
+        self._queue.join()
+
+    def shutdown(self) -> None:
+        """Stop the worker thread. Safe to call multiple times."""
+        if self._thread is not None and self._thread.is_alive():
+            self._queue.put(None)
+            self._thread.join(timeout=60)
+        self._thread = None
 
 
 @dataclass
@@ -160,6 +230,9 @@ class Sam3DBody:
             segmentor_path=segmentor_path,
             device=self.device,
         )
+
+        # Background saver for offloading I/O; set per predict_batch call
+        self._bg_saver: _BackgroundSaver | None = None
 
     @property
     def faces(self) -> np.ndarray:
@@ -414,33 +487,44 @@ class Sam3DBody:
                 np.save(str(shape_path), shape_override)
                 print(f"Saved shape to {shape_path}")
 
+        # Start background saver so I/O doesn't block the inference loop
+        if output_dir is not None:
+            self._bg_saver = _BackgroundSaver()
+
         results = []
-        for img_path in tqdm(image_files, desc="Inference"):
-            result = self.predict(
-                img_path,
-                bbox_threshold=bbox_threshold,
-                use_mask=use_mask,
-                shape_override=shape_override,
-                focal_length=focal_length,
-            )
-            results.append(result)
+        try:
+            for img_path in tqdm(image_files, desc="Inference"):
+                result = self.predict(
+                    img_path,
+                    bbox_threshold=bbox_threshold,
+                    use_mask=use_mask,
+                    shape_override=shape_override,
+                    focal_length=focal_length,
+                )
+                results.append(result)
 
-            if output_dir is not None and result.num_persons > 0:
-                image_name = img_path.stem
+                if output_dir is not None and result.num_persons > 0:
+                    image_name = img_path.stem
 
-                # Always save raw numpy results
-                self._save_numpy_results(result, output_dir, image_name)
+                    # Always save raw numpy results
+                    self._save_numpy_results(result, output_dir, image_name)
 
-                if save_visualizations:
-                    self._save_visualization(result, output_dir, image_name)
+                    if save_visualizations:
+                        self._save_visualization(result, output_dir, image_name)
 
-                if save_meshes:
-                    self._save_meshes(result, output_dir, image_name)
+                    if save_meshes:
+                        self._save_meshes(result, output_dir, image_name)
+        finally:
+            if self._bg_saver is not None:
+                self._bg_saver.flush()
+                self._bg_saver.shutdown()
+                self._bg_saver = None
 
         total_persons = sum(r.num_persons for r in results)
         print(f"Done: {len(results)} images, {total_persons} persons detected.")
         return results
 
+    @_bg_save
     def _save_numpy_results(
         self, result: ImageResult, output_dir: Path, image_name: str
     ) -> None:
@@ -452,6 +536,7 @@ class Sam3DBody:
             out_path = raw_dir / f"{image_name}{suffix}.npz"
             np.savez(str(out_path), **p.raw)
 
+    @_bg_save
     def _save_visualization(
         self, result: ImageResult, output_dir: Path, image_name: str
     ) -> None:
@@ -469,6 +554,7 @@ class Sam3DBody:
         out_path = vis_dir / f"{image_name}.jpg"
         cv2.imwrite(str(out_path), vis.astype(np.uint8))
 
+    @_bg_save
     def _save_meshes(
         self, result: ImageResult, output_dir: Path, image_name: str
     ) -> None:
