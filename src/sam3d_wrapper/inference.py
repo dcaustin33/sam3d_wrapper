@@ -24,6 +24,8 @@ from sam3d_wrapper.repo import activate_imports, ensure_detectron2, ensure_repo
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp", ".gif"}
 
+_PREFETCH_SENTINEL = object()  # signals end of prefetch queue
+
 logger = logging.getLogger(__name__)
 
 
@@ -89,6 +91,36 @@ class _BackgroundSaver:
             self._queue.put(None)
             self._thread.join(timeout=60)
         self._thread = None
+
+
+class _ImagePrefetcher:
+    """Reads images from disk on a background thread, one step ahead of inference.
+
+    Usage::
+
+        prefetcher = _ImagePrefetcher(file_list, maxsize=2)
+        for path, img_bgr in prefetcher:
+            ...  # img_bgr is already loaded
+    """
+
+    def __init__(self, paths: list[Path], maxsize: int = 2) -> None:
+        self._paths = paths
+        self._queue: Queue = Queue(maxsize=maxsize)
+        self._thread = threading.Thread(target=self._worker, daemon=True)
+        self._thread.start()
+
+    def _worker(self) -> None:
+        for p in self._paths:
+            img = cv2.imread(str(p))
+            self._queue.put((p, img))
+        self._queue.put(_PREFETCH_SENTINEL)
+
+    def __iter__(self):
+        while True:
+            item = self._queue.get()
+            if item is _PREFETCH_SENTINEL:
+                break
+            yield item
 
 
 @dataclass
@@ -196,12 +228,6 @@ class Sam3DBody:
     ):
         import torch
 
-        # Ensure the upstream repo is available
-        ensure_repo()
-        if use_detector:
-            ensure_detectron2()
-        activate_imports()
-
         self.model_variant = model_variant
         self.bbox_threshold = bbox_threshold
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -218,25 +244,43 @@ class Sam3DBody:
         else:
             self.hf_repo_id = hf_repo_id
 
-        # Import upstream modules (now on sys.path)
-        from notebook.utils import setup_sam_3d_body
+        # Store init config for lazy loading
+        self._use_detector = use_detector
+        self._use_segmentor = use_segmentor
+        self._use_fov = use_fov
+        self._segmentor_path = segmentor_path
 
-        # Build estimator
-        self._estimator = setup_sam_3d_body(
-            hf_repo_id=self.hf_repo_id,
-            detector_name="vitdet" if use_detector else "",
-            segmentor_name="sam2" if use_segmentor else "",
-            fov_name="moge2" if use_fov else "",
-            segmentor_path=segmentor_path,
-            device=self.device,
-        )
+        # Estimator is loaded lazily on first predict() call
+        self._estimator = None
 
         # Background saver for offloading I/O; set per predict_batch call
         self._bg_saver: _BackgroundSaver | None = None
 
+    def _ensure_estimator(self) -> None:
+        """Load the model on first use (lazy init)."""
+        if self._estimator is not None:
+            return
+
+        ensure_repo()
+        if self._use_detector:
+            ensure_detectron2()
+        activate_imports()
+
+        from notebook.utils import setup_sam_3d_body
+
+        self._estimator = setup_sam_3d_body(
+            hf_repo_id=self.hf_repo_id,
+            detector_name="vitdet" if self._use_detector else "",
+            segmentor_name="sam2" if self._use_segmentor else "",
+            fov_name="moge2" if self._use_fov else "",
+            segmentor_path=self._segmentor_path,
+            device=self.device,
+        )
+
     @property
     def faces(self) -> np.ndarray:
         """Mesh face indices from the loaded model."""
+        self._ensure_estimator()
         return self._estimator.faces
 
     @staticmethod
@@ -272,6 +316,9 @@ class Sam3DBody:
         ``shape_params`` in each person's result, keeping the original
         pose, scale, and camera parameters.
 
+        When a frame contains multiple persons, their parameters are batched
+        into a single forward pass for efficiency.
+
         Args:
             result: An ImageResult from a prior ``predict`` call.
             shape_override: A (45,) numpy array of shape PCA coefficients.
@@ -279,60 +326,69 @@ class Sam3DBody:
         Returns:
             The same ImageResult, mutated in-place with updated vertices.
         """
+        if not result.persons:
+            return result
+
         import torch
 
+        self._ensure_estimator()
         head = self._estimator.model.head_pose
         device = next(head.parameters()).device
+
+        n = len(result.persons)
+
+        # Stack all person params into batched tensors (N, dim)
+        def _stack(key):
+            return torch.tensor(
+                np.stack([p.raw[key] for p in result.persons]),
+                dtype=torch.float32,
+            ).to(device)
+
+        global_rot = _stack("global_rot")
+        body_pose = _stack("body_pose_params")
+        hand_pose = _stack("hand_pose_params")
+        scale = _stack("scale_params")
+        expr = _stack("expr_params")
         shape_t = torch.tensor(
             shape_override, dtype=torch.float32
-        ).unsqueeze(0).to(device)
+        ).unsqueeze(0).expand(n, -1).to(device)
 
-        for person in result.persons:
+        with torch.no_grad():
+            verts, j3d, jcoords, model_params, joint_rots = head.mhr_forward(
+                global_trans=torch.zeros_like(global_rot),
+                global_rot=global_rot,
+                body_pose_params=body_pose,
+                hand_pose_params=hand_pose,
+                scale_params=scale,
+                shape_params=shape_t,
+                expr_params=expr,
+                return_keypoints=True,
+                return_joint_coords=True,
+                return_model_params=True,
+                return_joint_rotations=True,
+            )
+            j3d = j3d[:, :70]
+            verts[..., [1, 2]] *= -1
+            j3d[..., [1, 2]] *= -1
+
+        # Unpack batched results back to per-person
+        verts_np = verts.cpu().numpy()
+        j3d_np = j3d.cpu().numpy()
+        jcoords_np = jcoords.cpu().numpy()
+        model_params_np = model_params.cpu().numpy()
+        joint_rots_np = joint_rots.cpu().numpy()
+
+        for i, person in enumerate(result.persons):
             raw = person.raw
-            with torch.no_grad():
-                global_rot = torch.tensor(
-                    raw["global_rot"], dtype=torch.float32
-                ).unsqueeze(0).to(device)
-                verts, j3d, jcoords, model_params, joint_rots = head.mhr_forward(
-                    global_trans=global_rot * 0,
-                    global_rot=global_rot,
-                    body_pose_params=torch.tensor(
-                        raw["body_pose_params"], dtype=torch.float32
-                    ).unsqueeze(0).to(device),
-                    hand_pose_params=torch.tensor(
-                        raw["hand_pose_params"], dtype=torch.float32
-                    ).unsqueeze(0).to(device),
-                    scale_params=torch.tensor(
-                        raw["scale_params"], dtype=torch.float32
-                    ).unsqueeze(0).to(device),
-                    shape_params=shape_t,
-                    expr_params=torch.tensor(
-                        raw["expr_params"], dtype=torch.float32
-                    ).unsqueeze(0).to(device),
-                    return_keypoints=True,
-                    return_joint_coords=True,
-                    return_model_params=True,
-                    return_joint_rotations=True,
-                )
-                j3d = j3d[:, :70]
-                verts[..., [1, 2]] *= -1
-                j3d[..., [1, 2]] *= -1
-
-            new_verts = verts.squeeze(0).cpu().numpy()
-            new_j3d = j3d.squeeze(0).cpu().numpy()
-            new_jcoords = jcoords.squeeze(0).cpu().numpy()
-            new_model_params = model_params.squeeze(0).cpu().numpy()
-            new_joint_rots = joint_rots.squeeze(0).cpu().numpy()
-
-            person.pred_vertices = new_verts
-            person.pred_keypoints_3d = new_j3d
+            person.pred_vertices = verts_np[i]
+            person.pred_keypoints_3d = j3d_np[i]
             person.shape_params = shape_override.copy()
-            raw["pred_vertices"] = new_verts
-            raw["pred_keypoints_3d"] = new_j3d
+            raw["pred_vertices"] = verts_np[i]
+            raw["pred_keypoints_3d"] = j3d_np[i]
             raw["shape_params"] = shape_override.copy()
-            raw["pred_joint_coords"] = new_jcoords
-            raw["mhr_model_params"] = new_model_params
-            raw["pred_global_rots"] = new_joint_rots
+            raw["pred_joint_coords"] = jcoords_np[i]
+            raw["mhr_model_params"] = model_params_np[i]
+            raw["pred_global_rots"] = joint_rots_np[i]
 
         return result
 
@@ -377,6 +433,8 @@ class Sam3DBody:
         """
         import torch
 
+        self._ensure_estimator()
+
         thr = bbox_threshold if bbox_threshold is not None else self.bbox_threshold
 
         if isinstance(image, (str, Path)):
@@ -398,7 +456,9 @@ class Sam3DBody:
             cam_int = self._build_cam_intrinsics(focal_length, (h, w))
             kwargs["cam_int"] = torch.tensor(cam_int)
 
-        raw_outputs = self._estimator.process_one_image(image_path, **kwargs)
+        raw_outputs = self._estimator.process_one_image(
+            img_bgr if image_path == "<array>" else image_path, **kwargs
+        )
         persons = _parse_outputs(raw_outputs)
 
         result = ImageResult(
@@ -458,7 +518,8 @@ class Sam3DBody:
             output_dir = Path(output_dir)
             output_dir.mkdir(parents=True, exist_ok=True)
 
-        # --- Shape calibration phase ---
+        # --- Shape calibration phase (results are cached for reuse) ---
+        cal_cache: dict[str, ImageResult] = {}
         if shape_calibration_frames is not None and shape_override is None:
             n = min(shape_calibration_frames, len(image_files))
             calibration_files = random.sample(image_files, n)
@@ -468,14 +529,14 @@ class Sam3DBody:
             )
             cal_results = []
             for img_path in tqdm(calibration_files, desc="Calibration"):
-                cal_results.append(
-                    self.predict(
-                        img_path,
-                        bbox_threshold=bbox_threshold,
-                        use_mask=use_mask,
-                        focal_length=focal_length,
-                    )
+                r = self.predict(
+                    img_path,
+                    bbox_threshold=bbox_threshold,
+                    use_mask=use_mask,
+                    focal_length=focal_length,
                 )
+                cal_results.append(r)
+                cal_cache[str(img_path)] = r
             shape_override = self.average_shape(cal_results)
             print(f"Calibrated shape from {n} frames.")
 
@@ -491,16 +552,32 @@ class Sam3DBody:
         if output_dir is not None:
             self._bg_saver = _BackgroundSaver()
 
+        # Prefetch images from disk while GPU is busy
+        prefetcher = _ImagePrefetcher(image_files)
+
         results = []
         try:
-            for img_path in tqdm(image_files, desc="Inference"):
-                result = self.predict(
-                    img_path,
-                    bbox_threshold=bbox_threshold,
-                    use_mask=use_mask,
-                    shape_override=shape_override,
-                    focal_length=focal_length,
-                )
+            for img_path, img_bgr in tqdm(prefetcher, total=len(image_files), desc="Inference"):
+                # Reuse cached calibration result (just apply shape override)
+                cached = cal_cache.pop(str(img_path), None)
+                if cached is not None:
+                    if shape_override is not None:
+                        self.recompute_with_shape(cached, shape_override)
+                    result = cached
+                else:
+                    if img_bgr is None:
+                        logger.warning("Could not read image: %s (skipping)", img_path)
+                        continue
+                    result = self.predict(
+                        img_bgr,
+                        bbox_threshold=bbox_threshold,
+                        use_mask=use_mask,
+                        shape_override=shape_override,
+                        focal_length=focal_length,
+                    )
+                    # Restore the real path (predict sets "<array>" for ndarray input)
+                    result.image_path = str(img_path)
+
                 results.append(result)
 
                 if output_dir is not None and result.num_persons > 0:
@@ -541,7 +618,6 @@ class Sam3DBody:
         self, result: ImageResult, output_dir: Path, image_name: str
     ) -> None:
         """Save a visualization image with mesh overlays in vis/ subdir."""
-        activate_imports()
         from tools.vis_utils import visualize_sample_together
 
         if result.image_bgr is None or result.num_persons == 0:
@@ -559,7 +635,6 @@ class Sam3DBody:
         self, result: ImageResult, output_dir: Path, image_name: str
     ) -> None:
         """Save .ply mesh files for each detected person."""
-        activate_imports()
         from notebook.utils import save_mesh_results
 
         if result.image_bgr is None or result.num_persons == 0:
