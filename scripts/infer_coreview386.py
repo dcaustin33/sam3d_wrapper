@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run SAM 3D Body inference on all cameras in CoreView_377.
+"""Run SAM 3D Body inference on all cameras in CoreView_386.
 
 Loads the model once, then iterates over all Camera_B* directories,
 using the per-camera focal length from intri.yml.
@@ -13,7 +13,7 @@ import numpy as np
 
 from sam3d_wrapper.inference import Sam3DBody
 
-DATASET = Path("/workspace/gaussian_avatar/datasets/zju_mocap/CoreView_377")
+DATASET = Path("/workspace/gaussian_avatar/datasets/zju_mocap/CoreView_386")
 
 
 def parse_focal_lengths(intri_path: Path) -> dict[str, float]:
@@ -30,9 +30,9 @@ def parse_focal_lengths(intri_path: Path) -> dict[str, float]:
 def main() -> None:
     focal_lengths = parse_focal_lengths(DATASET / "intri.yml")
 
-    camera_names = [f"Camera_B{i}" for i in range(3, 24)]
+    camera_names = [f"Camera_B{i}" for i in range(9, 24)]
     mask_dirs = [DATASET / f"{name}_masks" for name in camera_names]
-    print(f"Will process {len(mask_dirs)} cameras (Camera_B1_masks .. Camera_B23_masks)")
+    print(f"Will process {len(camera_names)} cameras: {', '.join(camera_names)}")
 
     model = Sam3DBody(
         model_variant="dinov3",

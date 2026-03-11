@@ -20,6 +20,6 @@ cd "$PROJECT_DIR"
 
 export PYOPENGL_PLATFORM=egl
 
-uv run python scripts/infer_coreview377.py
+export HF_TOKEN="${HF_TOKEN:-$HF_API_KEY}"
 
-sudo shutdown -h now
+uv run python scripts/infer_coreview386.py
