@@ -92,10 +92,10 @@ packages = ["src/sam3d_wrapper"]
 index-strategy = "unsafe-best-match"
 
 [[tool.uv.index]]
-name = "pytorch-cu130"
-url = "https://download.pytorch.org/whl/cu130"
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu130" }
-torchvision = { index = "pytorch-cu130" }
+torch = { index = "pytorch-cu126" }
+torchvision = { index = "pytorch-cu126" }

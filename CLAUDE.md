@@ -65,4 +65,4 @@ The package lives in `src/sam3d_wrapper/` with four modules:
 
 ## Dependencies
 
-Uses `uv` as package manager with `hatchling` build backend. PyTorch and TorchVision are pinned to CUDA 12.4 index via `tool.uv.sources`. The `allow-direct-references = true` hatch setting supports the `moge` git dependency for FOV estimation.
+Uses `uv` as package manager with `hatchling` build backend. PyTorch and TorchVision are pinned to the CUDA 12.6 index (`cu126`) via `tool.uv.sources` in `pyproject.toml`. The system has CUDA 12.6 (driver 535.154.05). To change the CUDA version, update the `[[tool.uv.index]]` URL and `[tool.uv.sources]` entries in `pyproject.toml` (e.g., `cu124` for CUDA 12.4, `cu121` for CUDA 12.1, `cpu` for CPU-only), then run `uv lock && uv sync`. The `allow-direct-references = true` hatch setting supports the `moge` git dependency for FOV estimation.
