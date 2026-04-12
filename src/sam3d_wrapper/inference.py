@@ -167,6 +167,21 @@ def _collect_images(path: str | Path) -> list[Path]:
     raise FileNotFoundError(f"Path does not exist: {path}")
 
 
+def _bbox_area(bbox: np.ndarray) -> float:
+    """Area of an [x1, y1, x2, y2] bbox."""
+    x1, y1, x2, y2 = bbox[:4]
+    return max(0.0, float(x2 - x1)) * max(0.0, float(y2 - y1))
+
+
+def _select_largest(persons: list[PersonResult], max_persons: int) -> list[PersonResult]:
+    """Keep the ``max_persons`` largest bboxes, preserving original order."""
+    if max_persons <= 0 or len(persons) <= max_persons:
+        return persons
+    ranked = sorted(persons, key=lambda p: _bbox_area(p.bbox), reverse=True)
+    keep = {id(p) for p in ranked[:max_persons]}
+    return [p for p in persons if id(p) in keep]
+
+
 def _parse_outputs(raw_outputs: list[dict], person_offset: int = 0) -> list[PersonResult]:
     """Convert raw upstream output dicts to PersonResult objects."""
     results = []
@@ -413,6 +428,7 @@ class Sam3DBody:
         bboxes: np.ndarray | None = None,
         shape_override: np.ndarray | None = None,
         focal_length: float | None = None,
+        max_persons: int | None = None,
     ) -> ImageResult:
         """
         Run inference on a single image.
@@ -427,6 +443,8 @@ class Sam3DBody:
             focal_length: Fixed focal length in pixels. When provided, skips
                 FOV estimation and uses this value for both fx and fy with the
                 principal point at the image center.
+            max_persons: If set, keep only the N persons with the largest
+                bboxes (by area). Applied before ``shape_override``.
 
         Returns:
             ImageResult with detected persons and their mesh data.
@@ -461,6 +479,9 @@ class Sam3DBody:
         )
         persons = _parse_outputs(raw_outputs)
 
+        if max_persons is not None:
+            persons = _select_largest(persons, max_persons)
+
         result = ImageResult(
             image_path=image_path,
             persons=persons,
@@ -483,6 +504,7 @@ class Sam3DBody:
         shape_override: np.ndarray | None = None,
         shape_calibration_frames: int | None = None,
         focal_length: float | None = None,
+        max_persons: int | None = None,
     ) -> list[ImageResult]:
         """
         Run inference on a directory of images.
@@ -503,6 +525,8 @@ class Sam3DBody:
                 is already provided.
             focal_length: Fixed focal length in pixels. When provided, skips
                 FOV estimation and uses this value for every frame.
+            max_persons: If set, keep only the N persons with the largest
+                bboxes (by area) in each frame.
 
         Returns:
             List of ImageResult, one per input image.
@@ -534,6 +558,7 @@ class Sam3DBody:
                     bbox_threshold=bbox_threshold,
                     use_mask=use_mask,
                     focal_length=focal_length,
+                    max_persons=max_persons,
                 )
                 cal_results.append(r)
                 cal_cache[str(img_path)] = r
@@ -574,6 +599,7 @@ class Sam3DBody:
                         use_mask=use_mask,
                         shape_override=shape_override,
                         focal_length=focal_length,
+                        max_persons=max_persons,
                     )
                     # Restore the real path (predict sets "<array>" for ndarray input)
                     result.image_path = str(img_path)
@@ -723,6 +749,12 @@ def cli_infer() -> None:
         help="Path to a .npy file containing a (45,) shape vector to use for all frames",
     )
     parser.add_argument(
+        "--max-persons",
+        type=int,
+        default=None,
+        help="Keep only the N persons with the largest bboxes per frame.",
+    )
+    parser.add_argument(
         "--shape-calibration-frames",
         type=int,
         default=None,
@@ -754,4 +786,5 @@ def cli_infer() -> None:
         shape_override=shape_override,
         shape_calibration_frames=args.shape_calibration_frames,
         focal_length=args.focal_length,
+        max_persons=args.max_persons,
     )
