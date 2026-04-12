@@ -59,6 +59,7 @@ dependencies = [
 
     # Misc
     "tqdm>=4.65",
+    "yt-dlp>=2025.1.15",
 ]
 
 [project.optional-dependencies]
