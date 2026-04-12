@@ -182,6 +182,31 @@ def _select_largest(persons: list[PersonResult], max_persons: int) -> list[Perso
     return [p for p in persons if id(p) in keep]
 
 
+def _bbox_center(bbox: np.ndarray) -> np.ndarray:
+    x1, y1, x2, y2 = bbox[:4]
+    return np.array([(x1 + x2) / 2.0, (y1 + y2) / 2.0], dtype=np.float64)
+
+
+def _select_most_isolated(
+    persons: list[PersonResult], max_persons: int
+) -> list[PersonResult]:
+    """Keep the ``max_persons`` boxes with the largest nearest-neighbor distance.
+
+    Each box is scored by the Euclidean distance from its center to the
+    center of its closest other box; the top-scoring boxes are kept. When
+    there are at most ``max_persons`` boxes the list is returned as-is.
+    """
+    if max_persons <= 0 or len(persons) <= max_persons:
+        return persons
+    centers = np.stack([_bbox_center(p.bbox) for p in persons])
+    diff = centers[:, None, :] - centers[None, :, :]
+    dists = np.linalg.norm(diff, axis=-1)
+    np.fill_diagonal(dists, np.inf)
+    nn_dist = dists.min(axis=1)
+    top_idx = set(np.argsort(-nn_dist)[:max_persons].tolist())
+    return [p for i, p in enumerate(persons) if i in top_idx]
+
+
 def _parse_outputs(raw_outputs: list[dict], person_offset: int = 0) -> list[PersonResult]:
     """Convert raw upstream output dicts to PersonResult objects."""
     results = []
@@ -429,6 +454,7 @@ class Sam3DBody:
         shape_override: np.ndarray | None = None,
         focal_length: float | None = None,
         max_persons: int | None = None,
+        max_isolated_persons: int | None = None,
     ) -> ImageResult:
         """
         Run inference on a single image.
@@ -445,6 +471,9 @@ class Sam3DBody:
                 principal point at the image center.
             max_persons: If set, keep only the N persons with the largest
                 bboxes (by area). Applied before ``shape_override``.
+            max_isolated_persons: If set, keep only the N persons whose
+                bbox center is farthest from its nearest neighbor. Applied
+                after ``max_persons`` and before ``shape_override``.
 
         Returns:
             ImageResult with detected persons and their mesh data.
@@ -481,6 +510,8 @@ class Sam3DBody:
 
         if max_persons is not None:
             persons = _select_largest(persons, max_persons)
+        if max_isolated_persons is not None:
+            persons = _select_most_isolated(persons, max_isolated_persons)
 
         result = ImageResult(
             image_path=image_path,
@@ -505,6 +536,7 @@ class Sam3DBody:
         shape_calibration_frames: int | None = None,
         focal_length: float | None = None,
         max_persons: int | None = None,
+        max_isolated_persons: int | None = None,
     ) -> list[ImageResult]:
         """
         Run inference on a directory of images.
@@ -527,6 +559,9 @@ class Sam3DBody:
                 FOV estimation and uses this value for every frame.
             max_persons: If set, keep only the N persons with the largest
                 bboxes (by area) in each frame.
+            max_isolated_persons: If set, keep only the N persons whose
+                bbox center is farthest from its nearest neighbor. Applied
+                after ``max_persons``.
 
         Returns:
             List of ImageResult, one per input image.
@@ -559,6 +594,7 @@ class Sam3DBody:
                     use_mask=use_mask,
                     focal_length=focal_length,
                     max_persons=max_persons,
+                    max_isolated_persons=max_isolated_persons,
                 )
                 cal_results.append(r)
                 cal_cache[str(img_path)] = r
@@ -600,6 +636,7 @@ class Sam3DBody:
                         shape_override=shape_override,
                         focal_length=focal_length,
                         max_persons=max_persons,
+                        max_isolated_persons=max_isolated_persons,
                     )
                     # Restore the real path (predict sets "<array>" for ndarray input)
                     result.image_path = str(img_path)
@@ -755,6 +792,12 @@ def cli_infer() -> None:
         help="Keep only the N persons with the largest bboxes per frame.",
     )
     parser.add_argument(
+        "--max-isolated-persons",
+        type=int,
+        default=None,
+        help="Keep only the N persons whose bbox is farthest from its nearest neighbor.",
+    )
+    parser.add_argument(
         "--shape-calibration-frames",
         type=int,
         default=None,
@@ -787,4 +830,5 @@ def cli_infer() -> None:
         shape_calibration_frames=args.shape_calibration_frames,
         focal_length=args.focal_length,
         max_persons=args.max_persons,
+        max_isolated_persons=args.max_isolated_persons,
     )
