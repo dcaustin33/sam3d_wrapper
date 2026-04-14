@@ -71,6 +71,11 @@ dev = [
     "pytest>=7.0",
 ]
 
+# Optional: SAM 3 text-prompted 2D segmentation (e.g. person masks)
+sam3 = [
+    "sam3-wrapper @ git+https://github.com/dcaustin33/sam3_wrapper",
+]
+
 [project.scripts]
 sam3d-setup = "sam3d_wrapper.repo:cli_setup"
 sam3d-download = "sam3d_wrapper.download:cli_download"
