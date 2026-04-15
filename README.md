@@ -169,8 +169,7 @@ This produces sibling folders under `--output`:
 ```
 results/
 ├── mhr/
-│   ├── <image_stem>.npz     # Per-person SAM 3D Body params
-│   └── <image_stem>.json    # {image_path, num_persons, per-person bbox/focal}
+│   └── <image_stem>.npz     # Raw SAM 3D Body arrays (same layout as sam3d-infer's raw/)
 └── mask/
     ├── <image_stem>.png     # Union mask for "a person" (8-bit grayscale 0/255)
     └── <image_stem>.json    # Scores + boxes (only when >1 mask is returned)

@@ -50,54 +50,18 @@ def _collect_images(path: Path) -> list[Path]:
     raise FileNotFoundError(f"Path does not exist: {path}")
 
 
-def _person_result_to_npz_dict(result) -> dict:
-    """Flatten an ImageResult's persons into a dict of numpy arrays.
-
-    Keys are ``person{i}_<field>`` for every non-None array field on
-    ``PersonResult``. Also stores a top-level ``num_persons`` scalar.
-    """
-    out: dict = {"num_persons": np.array(result.num_persons, dtype=np.int32)}
-    array_fields = (
-        "pred_vertices",
-        "pred_keypoints_3d",
-        "pred_keypoints_2d",
-        "pred_cam_t",
-        "bbox",
-        "body_pose_params",
-        "hand_pose_params",
-        "shape_params",
-    )
-    for p in result.persons:
-        prefix = f"person{p.person_id}_"
-        for name in array_fields:
-            val = getattr(p, name)
-            if val is not None:
-                out[prefix + name] = np.asarray(val)
-        out[prefix + "focal_length"] = np.asarray(p.focal_length, dtype=np.float32)
-    return out
-
-
-def _person_result_to_meta(result) -> dict:
-    persons_meta = []
-    for p in result.persons:
-        persons_meta.append({
-            "person_id": int(p.person_id),
-            "bbox": np.asarray(p.bbox).tolist(),
-            "focal_length": float(p.focal_length),
-        })
-    return {
-        "image_path": str(result.image_path),
-        "num_persons": int(result.num_persons),
-        "persons": persons_meta,
-    }
-
-
 def _save_mhr_outputs(result, mhr_dir: Path, stem: str) -> None:
-    npz_path = mhr_dir / f"{stem}.npz"
-    json_path = mhr_dir / f"{stem}.json"
-    np.savez(str(npz_path), **_person_result_to_npz_dict(result))
-    with open(json_path, "w") as f:
-        json.dump(_person_result_to_meta(result), f, indent=2)
+    """Save per-person raw arrays as ``.npz``.
+
+    Mirrors ``Sam3DBody._save_numpy_results``: one ``.npz`` per person,
+    storing ``**p.raw``. Single-person frames go to ``<stem>.npz``;
+    multi-person frames fall back to ``<stem>_person{i}.npz``.
+    """
+    if result.num_persons == 0:
+        return
+    for p in result.persons:
+        suffix = "" if result.num_persons == 1 else f"_person{p.person_id}"
+        np.savez(str(mhr_dir / f"{stem}{suffix}.npz"), **p.raw)
 
 
 def _save_mask_outputs(seg_result, mask_dir: Path, stem: str) -> None:
