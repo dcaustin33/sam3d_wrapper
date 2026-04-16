@@ -148,6 +148,36 @@ uv run sam3d-infer \
     --use-mask
 ```
 
+### Optional: 2D person masks via SAM 3
+
+To get per-image 2D person masks alongside the 3D body parameters, install the
+optional `sam3` extra (pulls [sam3-wrapper](https://github.com/dcaustin33/sam3_wrapper))
+and run the combined-inference script:
+
+```bash
+# Install the extra and download the SAM 3 checkpoint (requires HF login
+# and access to facebook/sam3)
+bash scripts/setup_sam3.sh
+
+# Run both pipelines concurrently; SAM 3 runs in batches of 8 by default.
+PYOPENGL_PLATFORM=egl uv run python scripts/infer_with_mask.py \
+    --images ./photos --output ./results --mask-batch-size 8
+```
+
+This produces sibling folders under `--output`:
+
+```
+results/
+├── mhr/
+│   └── <image_stem>.npz     # Raw SAM 3D Body arrays (same layout as sam3d-infer's raw/)
+└── mask/
+    ├── <image_stem>.png     # Union mask for "a person" (8-bit grayscale 0/255)
+    └── <image_stem>.json    # Scores + boxes (only when >1 mask is returned)
+```
+
+The two GPU pipelines run in separate threads so 3D pose estimation and 2D
+segmentation overlap.
+
 ## CLI commands
 
 | Command | Description |
