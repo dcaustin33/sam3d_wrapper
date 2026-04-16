@@ -5,9 +5,10 @@ description = "A convenient wrapper for Meta's SAM 3D Body for easy installation
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    # Core ML
-    "torch>=2.0",
-    "torchvision>=0.15",
+    # Core ML — pinned to versions available on the pytorch-cu126 index
+    # (kept in sync with sam3_wrapper so both can be installed together).
+    "torch>=2.6",
+    "torchvision>=0.21",
     "pytorch-lightning>=2.0",
     "einops>=0.7",
     "timm>=0.9",
@@ -94,7 +95,7 @@ packages = ["src/sam3d_wrapper"]
 [tool.uv]
 # Pin torch/torchvision to the PyTorch CUDA index so other packages
 # resolve from PyPI normally. Adjust the URL for your CUDA version:
-#   cu124 -> CUDA 12.4   cu121 -> CUDA 12.1   cpu -> CPU-only
+#   cu126 -> CUDA 12.6   cu124 -> CUDA 12.4   cpu -> CPU-only
 index-strategy = "unsafe-best-match"
 
 [[tool.uv.index]]
