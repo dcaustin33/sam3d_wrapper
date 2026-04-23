@@ -35,3 +35,8 @@ Thumbs.db
 output/
 results/
 datasets/
+
+# Secrets
+.env
+.env.*
+!.env.example

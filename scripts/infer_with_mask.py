@@ -120,10 +120,15 @@ def _run_sam3d(
     io_pool: ThreadPoolExecutor,
     bbox_threshold: float,
     progress: "Queue[str]",
+    shape_override: np.ndarray | None = None,
 ) -> None:
     for img_path in image_paths:
         try:
-            result = body_model.predict(img_path, bbox_threshold=bbox_threshold)
+            result = body_model.predict(
+                img_path,
+                bbox_threshold=bbox_threshold,
+                shape_override=shape_override,
+            )
             result.image_path = str(img_path)
         except Exception:  # noqa: BLE001 - log & continue per-image
             logger.exception("SAM3D predict failed for %s", img_path)
@@ -187,7 +192,17 @@ def main() -> None:
     parser.add_argument("--images", type=str, required=True,
                         help="Path to an image file or directory of images")
     parser.add_argument("--output", type=str, default="./sam3d_mask_results",
-                        help="Output directory (default: ./sam3d_mask_results)")
+                        help="Output directory (default: ./sam3d_mask_results). "
+                             "Ignored if both --mhr-dir and --mask-dir are set.")
+    parser.add_argument("--mhr-dir", type=str, default=None,
+                        help="Explicit dir for SAM3D .npz outputs "
+                             "(default: <output>/mhr)")
+    parser.add_argument("--mask-dir", type=str, default=None,
+                        help="Explicit dir for SAM3 mask .png outputs "
+                             "(default: <output>/mask)")
+    parser.add_argument("--shape-override", type=str, default=None,
+                        help="Path to a (45,) .npy shape vector applied to "
+                             "every SAM3D prediction")
     parser.add_argument("--variant", choices=["dinov3", "vith"], default="dinov3",
                         help="SAM 3D Body model variant (default: dinov3)")
     parser.add_argument("--device", type=str, default=None,
@@ -204,6 +219,9 @@ def main() -> None:
                         help="Images per SAM 3 forward pass (default: 8)")
     parser.add_argument("--io-workers", type=int, default=4,
                         help="Background threads for disk I/O (default: 4)")
+    parser.add_argument("--sequential", action="store_true",
+                        help="Run SAM3D then SAM3 serially (frees GPU between "
+                             "models; use on memory-constrained devices).")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -224,21 +242,84 @@ def main() -> None:
         sys.exit(f"No images found at {image_root}")
 
     output_dir = Path(args.output)
-    mhr_dir = output_dir / "mhr"
-    mask_dir = output_dir / "mask"
+    mhr_dir = Path(args.mhr_dir) if args.mhr_dir else output_dir / "mhr"
+    mask_dir = Path(args.mask_dir) if args.mask_dir else output_dir / "mask"
     mhr_dir.mkdir(parents=True, exist_ok=True)
     mask_dir.mkdir(parents=True, exist_ok=True)
 
+    shape_override: np.ndarray | None = None
+    if args.shape_override is not None:
+        shape_override = np.load(args.shape_override).astype(np.float32)
+        if shape_override.shape != (45,):
+            sys.exit(
+                f"--shape-override must be a (45,) array, got {shape_override.shape}"
+            )
+        print(f"Using shape override from {args.shape_override} (shape={shape_override.shape})")
+
     print(f"Found {len(image_paths)} images. Loading models ...")
 
-    # Instantiate both models up-front on the main thread so model-load errors
-    # surface immediately and we don't race on CUDA init inside workers.
+    progress: "Queue[str]" = Queue()
+    io_pool = ThreadPoolExecutor(max_workers=args.io_workers, thread_name_prefix="io")
+
+    if args.sequential:
+        import gc
+
+        import torch
+
+        # --- SAM3D pass ---
+        print("Sequential mode: running SAM3D first ...")
+        body_model = Sam3DBody(
+            model_variant=args.variant,
+            device=args.device,
+            bbox_threshold=args.bbox_threshold,
+        )
+        body_model._ensure_estimator()
+        _run_sam3d(
+            body_model, image_paths, mhr_dir, io_pool,
+            args.bbox_threshold, progress,
+            shape_override=shape_override,
+        )
+        sam3d_done = 0
+        while sam3d_done < len(image_paths):
+            progress.get()
+            sam3d_done += 1
+            if sam3d_done % 10 == 0 or sam3d_done == len(image_paths):
+                print(f"  progress: sam3d {sam3d_done}/{len(image_paths)}")
+
+        del body_model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        # --- SAM3 pass ---
+        print("Sequential mode: running SAM3 masks ...")
+        segmenter = Sam3Segmenter(
+            device=args.device,
+            threshold=args.seg_threshold,
+            mask_threshold=args.mask_threshold,
+        )
+        _run_sam3(
+            segmenter, image_paths, mask_dir, io_pool,
+            args.text, args.mask_batch_size,
+            args.seg_threshold, args.mask_threshold, progress,
+        )
+        sam3_done = 0
+        while sam3_done < len(image_paths):
+            progress.get()
+            sam3_done += 1
+            if sam3_done % 10 == 0 or sam3_done == len(image_paths):
+                print(f"  progress: sam3 {sam3_done}/{len(image_paths)}")
+
+        io_pool.shutdown(wait=True)
+        print(f"Done. MHR outputs: {mhr_dir} | Mask outputs: {mask_dir}")
+        return
+
+    # --- Concurrent (default) mode ---
     body_model = Sam3DBody(
         model_variant=args.variant,
         device=args.device,
         bbox_threshold=args.bbox_threshold,
     )
-    # Force lazy init now (ensures repo clone + detectron2 imports happen here).
     body_model._ensure_estimator()
 
     segmenter = Sam3Segmenter(
@@ -249,13 +330,11 @@ def main() -> None:
 
     print("Starting concurrent SAM3D + SAM3 pipelines ...")
 
-    progress: "Queue[str]" = Queue()
-    io_pool = ThreadPoolExecutor(max_workers=args.io_workers, thread_name_prefix="io")
-
     sam3d_thread = _WorkerThread(
         target=lambda: _run_sam3d(
             body_model, image_paths, mhr_dir, io_pool,
             args.bbox_threshold, progress,
+            shape_override=shape_override,
         ),
         name="sam3d",
     )
@@ -271,7 +350,6 @@ def main() -> None:
     sam3d_thread.start()
     sam3_thread.start()
 
-    # Progress reporter on the main thread (keeps the workers lean).
     expected = 2 * len(image_paths)
     sam3d_done = sam3_done = 0
     while sam3d_done + sam3_done < expected:
@@ -296,7 +374,7 @@ def main() -> None:
         if t.exc is not None:
             raise t.exc
 
-    print(f"Done. Outputs in {output_dir}/{{mhr,mask}}/")
+    print(f"Done. MHR outputs: {mhr_dir} | Mask outputs: {mask_dir}")
 
 
 if __name__ == "__main__":
