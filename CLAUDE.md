@@ -59,9 +59,11 @@ The package lives in `src/sam3d_wrapper/` with four modules:
 
 - **Headless rendering needs `PYOPENGL_PLATFORM=egl`**: Always set this env var when running inference with visualization on servers without a display. The EGL backend also requires the user to be in the `video` and `render` groups for `/dev/dri` access.
 
-- **System packages for rendering**: `libegl1-mesa` and `libosmesa6` must be installed via apt for pyrender's offscreen rendering to work.
+- **System packages for rendering**: `libegl1-mesa` and `libosmesa6` must be installed via apt for pyrender's offscreen rendering to work. **On Ubuntu 24.04 the package was split** — `libegl1-mesa` no longer exists; install `libegl1 libegl-mesa0 libegl1-mesa-dev libosmesa6` instead. `scripts/setup.sh` still references the old name and will silently fail at step 1 because the apt-install line redirects stderr to `/dev/null`. If you find the script exited very early (no `vendor/` or `checkpoints/`), this is why.
 
 - **setuptools pinned <81**: detectron2 uses `pkg_resources` which was removed in setuptools 81+. The project pins `setuptools<81` and also includes `cloudpickle` as a direct dependency since detectron2 is installed with `--no-deps`.
+
+- **uv environment variables can silently break `uv sync`**: If the shell has `UV_NO_CACHE=1`, `UV_CACHE_DIR` pointing to a non-writable path, or `UV_LINK_MODE=copy`, `uv sync` will re-download every wheel (torch is ~800 MB, cuDNN ~670 MB, cuBLAS ~375 MB) into an ephemeral `/tmp/.tmpXXXX` cache that's discarded on exit, and copy-mode adds significant overhead. Symptoms: extremely slow sync that produces an empty `.venv` after the process exits. Diagnose with `env | grep ^UV_` and `uv cache dir` — if the cache dir is under `/tmp/`, the env is broken. Workaround for a single run: `env -u UV_NO_CACHE UV_CACHE_DIR=~/.cache/uv UV_LINK_MODE=hardlink uv sync`. Permanent fix: remove the `UV_*` exports from the shell init that's setting them.
 
 ## Dependencies
 
