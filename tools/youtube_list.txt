@@ -1,0 +1,20 @@
+# YouTube downloads — one entry per line.
+# Format (whitespace-separated):  URL  [START]  [END]
+#   - START / END are optional. Use "-" as a placeholder to skip one.
+#   - Times accept seconds (90), m:ss (1:30), or h:mm:ss (0:01:30).
+#   - Lines starting with "#" and blank lines are ignored.
+
+https://www.youtube.com/watch?v=EwNLz21D4Uw
+https://www.youtube.com/watch?v=gKlbczZuDO4  0:00  0:04
+https://www.youtube.com/watch?v=CzmeA1o0AN0  0:00  0:04
+https://www.youtube.com/watch?v=Gxi_L_u_PsY  0:00  0:04
+https://www.youtube.com/watch?v=dRDSHnjsDAk  0:00  0:04
+https://www.youtube.com/watch?v=d924odWe1Dg  0:00  0:03
+https://www.youtube.com/watch?v=Ok8XiAhuk5Q  0:00  0:31
+https://www.youtube.com/watch?v=QDcofCrgc0U  0:00  0:31
+https://www.youtube.com/watch?v=rO_2_FFpQAM  0:00  0:31
+https://www.youtube.com/watch?v=prQZVCZi7UM  0:00  0:21
+https://www.youtube.com/watch?v=-QP2kjYCRtg  0:00  0:37
+https://www.youtube.com/watch?v=JDNBw65kytc  0:00  0:31
+https://www.youtube.com/watch?v=O04j3BMckws  0:00  0:31
+https://www.youtube.com/watch?v=TMouOBjou-Y  0:00  0:31
